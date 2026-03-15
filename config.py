@@ -13,48 +13,49 @@ log = logging.getLogger("tidal_rpc.config")
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 
-# Config lives next to this script so it's easy to find and edit
-SCRIPT_DIR  = Path(__file__).parent.resolve()
+def _exe_dir() -> Path:
+    """
+    Return the directory that should contain config.toml and tidal_session.json.
+
+    When running as a PyInstaller .exe:
+        sys.executable = C:\Programs\TidalRPC\TidalRPC.exe
+        __file__       = C:\...\AppData\Local\Temp\_MEIxxxxx\config.py  ← WRONG
+    So we use sys.executable's parent when frozen.
+
+    When running as a plain .py script:
+        __file__ is reliable — use its parent as before.
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent.resolve()
+    return Path(__file__).parent.resolve()
+
+
+SCRIPT_DIR  = _exe_dir()
 CONFIG_PATH = SCRIPT_DIR / "config.toml"
 
 # ── Defaults ───────────────────────────────────────────────────────────────────
 
 DEFAULTS: dict = {
     "discord": {
-        "client_id": "",          # REQUIRED — your Discord application ID
+        "client_id": "",
     },
     "tidal": {
-        # No client_id/secret — tidalapi uses its own built-in credentials
         "session_file": str(SCRIPT_DIR / "tidal_session.json"),
     },
     "rpc": {
-        # How often (seconds) to poll the OS media session.
-        # Discord rate-limits presence updates to 5/min — we only push on
-        # track changes so 5s is safe.
         "poll_interval":          5,
-
-        # How often (seconds) to refresh timestamps even when the track
-        # hasn't changed (keeps the progress bar accurate).
         "timestamp_refresh_secs": 30,
-
-        # Button shown on the Discord profile card
-        "button_label": "Play on TIDAL",
-        "button_url":   "https://tidal.com",   # overridden per-track when possible
-
-        # Discord image asset key to show when no album art is found.
-        # Upload a fallback image in the Discord developer portal and put its
-        # key here.  Leave blank to skip the large_image field entirely.
-        "fallback_art_key": "tidal_logo",
+        "button_label":           "Play on TIDAL",
+        "button_url":             "https://tidal.com",
+        "fallback_art_key":       "tidal_logo",
     },
     "logging": {
-        # "DEBUG" for verbose output, "INFO" for normal, "WARNING" to be quiet
         "level": "INFO",
     },
 }
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
-    """Recursively merge override into base, returning a new dict."""
     result = dict(base)
     for k, v in override.items():
         if k in result and isinstance(result[k], dict) and isinstance(v, dict):
@@ -78,7 +79,6 @@ def load_config() -> dict:
 
     cfg = _deep_merge(DEFAULTS, user_cfg)
 
-    # Validate required fields
     errors = []
     if not cfg["discord"]["client_id"]:
         errors.append("discord.client_id is required")

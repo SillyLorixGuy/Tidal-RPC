@@ -2,6 +2,7 @@
 config.toml
 tidal_session.json
 tidal_session.json.bak
+.vscode
 
 # ── Build output ───────────────────────────────────────────────────────────────
 dist/
