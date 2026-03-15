@@ -98,6 +98,21 @@ class DiscordRPC:
                 raise DiscordPayloadError(f"Payload rejected: {e}") from e
             raise DiscordConnectionError(f"RPC update failed: {e}") from e
 
+    def heartbeat(self) -> None:
+        """
+        Send a raw opcode-3 heartbeat on the IPC socket.
+        This tells Discord the connection is alive without modifying the
+        displayed activity — calling update() instead would reset the
+        progress bar by recalculating timestamps from scratch.
+        """
+        if self._rpc is None:
+            return
+        try:
+            self._rpc.send_data(3, {"v": 1, "client_id": self._client_id})
+            log.debug("Heartbeat sent")
+        except Exception as e:
+            log.debug("Heartbeat failed (harmless): %s", e)
+
     def clear(self) -> None:
         if self._rpc is None:
             return

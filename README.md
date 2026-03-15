@@ -6,8 +6,9 @@ keeps the progress bar accurate automatically.
 
 ```
 Listening to TIDAL
-your eyes
-68+1  ━━━━━━━●──────────  1:20 / 2:26
+drowning in problems
+68+1 
+1:10 ━━━━━━━●──────────   / 2:32
 ▶ Play on TIDAL
 ```
 
@@ -175,8 +176,8 @@ Tidal-RPC/
    same track don't hit the API again.
 
 3. **Discord presence** — sends updates via the Discord IPC pipe using pypresence.
-   Only pushes when the track changes or a position jump is detected (pause/resume,
-   scrubbing). Discord animates the progress bar client-side from the timestamps,
+   Only pushes when the track changes.
+   Discord animates the progress bar client-side from the timestamps,
    so no periodic updates are needed.
 
 4. **Timestamp correction** — compares the expected playback position (extrapolated

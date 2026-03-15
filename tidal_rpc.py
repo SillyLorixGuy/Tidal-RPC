@@ -116,9 +116,6 @@ def _relaunch_with_console(cfg: dict) -> None:
 setup_logger()
 log = logging.getLogger("tidal_rpc")
 
-_POSITION_DRIFT_THRESHOLD = 8.0
-
-
 def main() -> None:
     log.info("═" * 50)
     log.info("Tidal Discord RPC starting up")
@@ -160,6 +157,8 @@ def main() -> None:
     last_art_url:       str | None = None
     last_push_time:     float      = 0.0
     last_push_position: float      = 0.0
+    last_keepalive:     float      = 0.0
+    last_position:      float      = -1.0  # -1 = no previous SMTC reading yet
     discord_connected:  bool       = False
 
     while True:
@@ -188,20 +187,31 @@ def main() -> None:
 
             track_key     = f"{track['artist']}::{track['title']}"
             track_changed = track_key != last_track_key
-
-            now           = time.time()
-            elapsed_since = now - last_push_time
-            expected_pos  = last_push_position + elapsed_since
             actual_pos    = track["position_seconds"]
-            drift         = abs(actual_pos - expected_pos)
+            now           = time.time()
+
+            # Detect pause/resume by checking if the position stopped moving.
+            # During normal playback SMTC position advances ~poll_interval seconds
+            # between cycles. After a pause+resume the position jumps back or
+            # forward by more than the threshold relative to the previous reading.
+            # We compare raw SMTC values — no wall-clock math — so loop overhead
+            # never causes false positives.
+            pos_delta       = abs(actual_pos - last_position)
+            poll            = cfg["rpc"]["poll_interval"]
+            # A genuine scrub/resume produces a delta outside the expected
+            # [0, poll + tolerance] range. Tolerance of 3s covers SMTC jitter.
             position_jumped = (
                 last_track_key is not None
                 and not track_changed
-                and drift > _POSITION_DRIFT_THRESHOLD
+                and last_position > 0
+                and not (0 <= pos_delta <= poll + 3.0)
             )
 
             if position_jumped:
-                log.debug("Position drift %.1fs — resyncing timestamps", drift)
+                log.debug(
+                    "Position jump detected: %.1fs → %.1fs (delta %.1fs) — resyncing",
+                    last_position, actual_pos, pos_delta
+                )
 
             if track_changed or position_jumped:
                 if track_changed:
@@ -209,9 +219,18 @@ def main() -> None:
                     last_art_url = tidal.get_art_url(track["title"], track["artist"])
 
                 rpc.update(track, last_art_url)
-                last_track_key      = track_key
-                last_push_time      = now
-                last_push_position  = actual_pos
+                last_track_key  = track_key
+                last_keepalive  = now
+
+            elif now - last_keepalive >= 15.0 and last_track_key is not None:
+                # Send a raw heartbeat ping on the IPC socket.
+                # rpc.update() would reset the progress bar — we just want to
+                # tell Discord the connection is still alive without changing
+                # the displayed activity at all.
+                rpc.heartbeat()
+                last_keepalive = now
+
+            last_position = actual_pos
 
         except MediaSessionError as e:
             log.warning("Media session error: %s", e)
@@ -219,9 +238,7 @@ def main() -> None:
         except DiscordPayloadError as e:
             log.warning("Payload error (connection kept): %s", e)
             if track is not None:
-                last_track_key     = f"{track['artist']}::{track['title']}"
-                last_push_time     = time.time()
-                last_push_position = track["position_seconds"]
+                last_track_key = f"{track['artist']}::{track['title']}"
 
         except DiscordConnectionError as e:
             log.warning("Lost Discord IPC connection (%s) — will reconnect", e)
