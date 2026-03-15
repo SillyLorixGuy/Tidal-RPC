@@ -1,105 +1,198 @@
 # Tidal Discord RPC
 
 Shows your current Tidal track as a Discord rich presence — song title, artist,
-album art, and a live progress bar — exactly like Spotify does natively.
+album art, and a live progress bar. Detects pause/resume and scrubbing and
+keeps the progress bar accurate automatically.
 
 ```
 Listening to TIDAL
-Weightless — Marconi Union
-━━━━━━━━━━━━●──────────  2:14 / 8:09
+your eyes
+68+1  ━━━━━━━●──────────  1:20 / 2:26
+▶ Play on TIDAL
 ```
 
 ---
 
 ## Requirements
 
-- Windows 10 / 11 (primary support)
-- Python 3.11 or newer
-- Tidal desktop app (Store or EXE version)
+- Windows 10 / 11
+- Tidal desktop app (Microsoft Store or EXE version)
 - Discord desktop app
+- Python 3.12 or newer (only needed to build — not required to run the exe)
 
 ---
 
-## Setup
+## Running from source (development)
 
 ### 1 — Discord application
 
 1. Go to https://discord.com/developers/applications
-2. Click **New Application** — name it **TIDAL** (this is what shows in your status)
+2. Click **New Application** — name it **TIDAL** (shows as "Listening to TIDAL" in status)
 3. Copy the **Application ID** from the General Information page
 4. *(Optional)* Under **Rich Presence → Art Assets**, upload a fallback image
    named `tidal_logo` — shown when album art can't be fetched
 
-### 2 — Tidal API credentials
+### 2 — Configure
 
-1. Go to https://developer.tidal.com and sign in with your Tidal account
-2. Create a new application
-3. Copy the **Client ID** and **Client Secret**
-
-### 3 — Configure
-
-```bash
-cp config.example.toml config.toml
+```powershell
+copy config.example.toml config.toml
 ```
 
-Open `config.toml` and fill in:
+Open `config.toml` and fill in your Discord Application ID:
 
 ```toml
 [discord]
 client_id = "YOUR_DISCORD_APP_ID"
-
-[tidal]
-client_id     = "YOUR_TIDAL_CLIENT_ID"
-client_secret = "YOUR_TIDAL_CLIENT_SECRET"
 ```
 
-### 4 — Install dependencies
+That's the only required field. Tidal authentication is handled automatically
+on first run — no developer credentials needed.
 
-```bash
+### 3 — Install dependencies
+
+```powershell
 pip install -r requirements.txt
 ```
 
-### 5 — First run
+### 4 — First run
 
-```bash
+```powershell
 python tidal_rpc.py
 ```
 
-On first launch, a browser tab opens for Tidal OAuth login.
-After you approve it, the session is saved to `tidal_session.json` —
-you won't see this prompt again.
+On first launch a URL and code appear in the terminal — open the URL in your
+browser, log in with your Tidal account, and enter the code. The session is
+saved to `tidal_session.json` and reused automatically from then on.
 
-Play a track in Tidal and your Discord status should update within 5 seconds.
+Play a track in Tidal and your Discord status updates within 5 seconds.
 
-### 6 — Auto-start with Windows
+### 5 — Auto-start with Windows
 
-```bash
+```powershell
 python install_startup.py
 ```
 
-This adds a registry entry under `HKCU\...\Run` so the RPC starts silently
-with Windows (no console window, runs in background).
+Adds a registry entry under `HKCU\...\Run` so the script starts silently with
+Windows. No console window, runs in the background.
 
-To remove it:
-```bash
-python install_startup.py --remove
+```powershell
+python install_startup.py --remove    # remove from startup
+python install_startup.py --status    # check if installed
 ```
 
-To check if it's installed:
-```bash
-python install_startup.py --status
+---
+
+## Building the exe (no Python required to run)
+
+The build produces two exes:
+
+| Exe | Purpose |
+|---|---|
+| `TidalRPC.exe` | Silent background process — the one you actually run |
+| `TidalRPC_Setup.exe` | One-time Tidal OAuth setup with a visible console window |
+
+### Build
+
+```powershell
+python build.py
 ```
+
+For a debug build with a visible console (useful for diagnosing crashes):
+
+```powershell
+python build.py --debug
+```
+
+### Deploy
+
+```powershell
+Copy-Item -Recurse -Force dist\TidalRPC\*       C:\Programs\TidalRPC\
+Copy-Item -Recurse -Force dist\TidalRPC_Setup\* C:\Programs\TidalRPC\
+Copy-Item -Force config.toml                    C:\Programs\TidalRPC\config.toml
+```
+
+### First-time Tidal authentication
+
+```powershell
+C:\Programs\TidalRPC\TidalRPC_Setup.exe
+```
+
+A console window opens, shows the Tidal URL and code, and waits for you to
+authenticate. After that it closes and `TidalRPC.exe` launches automatically.
+You never need to run setup again unless you delete `tidal_session.json`.
+
+### Auto-start with Windows
+
+```powershell
+C:\Programs\TidalRPC\TidalRPC.exe --install-startup
+C:\Programs\TidalRPC\TidalRPC.exe --remove-startup
+C:\Programs\TidalRPC\TidalRPC.exe --status
+```
+
+### Rebuilding after code changes
+
+Only `TidalRPC.exe` needs replacing on most rebuilds:
+
+```powershell
+taskkill /F /IM TidalRPC.exe
+python build.py
+Copy-Item -Recurse -Force dist\TidalRPC\* C:\Programs\TidalRPC\
+```
+
+`config.toml` and `tidal_session.json` are never touched by a rebuild.
+
+---
+
+## File structure
+
+```
+Tidal-RPC/
+├── tidal_rpc.py          Main entry point and poll loop
+├── media_session.py      Windows SMTC reader (title, artist, position, duration)
+├── tidal_meta.py         Tidal catalog API wrapper (album art URLs)
+├── discord_rpc.py        Discord IPC wrapper (pypresence)
+├── setup_tidal.py        Standalone Tidal OAuth setup (built as TidalRPC_Setup.exe)
+├── config.py             Config loader
+├── logger.py             Rotating log file setup
+├── install_startup.py    Windows startup registry helper
+├── build.py              PyInstaller build script
+├── config.example.toml   Template — copy to config.toml
+├── config.toml           Your credentials (gitignored)
+├── tidal_session.json    Tidal OAuth token (auto-generated, gitignored)
+└── requirements.txt
+```
+
+---
+
+## How it works
+
+1. **Media session** — polls Windows SMTC (System Media Transport Controls) every
+   5 seconds. Tidal registers with SMTC automatically, so title, artist, album,
+   playback position and duration are all available without any Tidal API key.
+
+2. **Album art** — searches the Tidal catalog API for the current track and returns
+   a 640×640 CDN image URL. Results are cached in memory so repeated plays of the
+   same track don't hit the API again.
+
+3. **Discord presence** — sends updates via the Discord IPC pipe using pypresence.
+   Only pushes when the track changes or a position jump is detected (pause/resume,
+   scrubbing). Discord animates the progress bar client-side from the timestamps,
+   so no periodic updates are needed.
+
+4. **Timestamp correction** — compares the expected playback position (extrapolated
+   from the last push) against what SMTC reports. If the drift exceeds 8 seconds
+   it resyncs the timestamps, keeping the progress bar accurate after pausing.
 
 ---
 
 ## Logs
 
-Logs are written to:
 ```
 %APPDATA%\tidal-rpc\tidal_rpc.log
 ```
 
-Change the verbosity in `config.toml`:
+Rotating file, max 2 MB, 3 backups kept. Change verbosity in `config.toml`:
+
 ```toml
 [logging]
 level = "DEBUG"   # DEBUG | INFO | WARNING | ERROR
@@ -107,42 +200,35 @@ level = "DEBUG"   # DEBUG | INFO | WARNING | ERROR
 
 ---
 
-## File structure
-
-```
-tidal-rpc/
-├── tidal_rpc.py          Main entry point / poll loop
-├── media_session.py      OS media session reader (Windows SMTC)
-├── tidal_meta.py         Tidal catalog API wrapper (art URLs)
-├── discord_rpc.py        Discord IPC / pypresence wrapper
-├── config.py             Config loader
-├── logger.py             Logging setup
-├── install_startup.py    Windows startup registry helper
-├── config.example.toml   Template — copy to config.toml
-├── config.toml           Your credentials (gitignored)
-├── tidal_session.json    OAuth token cache (auto-generated)
-└── requirements.txt
-```
-
----
-
 ## Troubleshooting
 
-**"No active TIDAL session found"**
+**Status not showing / presence not updating**
+Make sure Discord is running before launching TidalRPC. Check the log file for
+connection errors.
+
+**"No active TIDAL session found in SMTC"**
 Tidal must be open and actively playing (not paused) for SMTC to report it.
-Try pausing and unpausing the track.
+Try pausing and unpausing.
 
-**Progress bar jumps / is wrong**
-This happens if you scrub in Tidal.  The poll loop corrects it within 5 seconds.
+**Progress bar resets after pause/resume**
+The 8-second drift threshold will correct it automatically within one poll cycle.
 
-**Discord status not showing**
-Make sure Discord is running *before* the RPC script.
-Check `tidal_rpc.log` for connection errors.
+**Wrong album art**
+The matching algorithm requires a confidence score of 3/5 — if nothing scores
+high enough it shows no art rather than the wrong art. Very obscure tracks may
+not be found. Set `level = "DEBUG"` in config.toml to see the match scores.
 
-**"Tidal login failed"**
-Delete `tidal_session.json` and restart — this forces a fresh OAuth flow.
+**"Tidal login failed" / auth expired**
+Delete `tidal_session.json` and run `TidalRPC_Setup.exe` again.
 
-**High CPU / memory**
-The script is a simple poll loop sleeping for 5 seconds between ticks.
-Idle RAM usage should be ~25–40 MB.  If higher, check for runaway asyncio
-tasks in the log.
+**Exe doesn't start / crashes silently**
+Run the debug build to see the error:
+```powershell
+python build.py --debug
+cd dist\TidalRPC
+.\TidalRPC.exe
+```
+
+**High memory usage**
+Normal idle usage is 25–50 MB. If significantly higher, check the log for
+errors in the asyncio event loop.
