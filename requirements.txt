@@ -1,0 +1,15 @@
+# Tidal Discord RPC — Python dependencies
+# Install with:  pip install -r requirements.txt
+
+# Discord IPC / Rich Presence
+# 4.5.0+ required for StatusDisplayType ("Listening to Artist" in status bar)
+pypresence>=4.5.0
+
+# Tidal catalog API (unofficial but maintained)
+tidalapi>=0.8.0
+
+# Windows SMTC — all sub-packages required (winrt 2.x split into separate packages)
+winrt-Windows.Media.Control>=2.4.0
+winrt-Windows.Foundation>=2.4.0
+winrt-Windows.Foundation.Collections>=2.4.0
+winrt-Windows.Storage.Streams>=2.4.0

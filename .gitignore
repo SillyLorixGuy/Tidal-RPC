@@ -1,0 +1,30 @@
+# ── Private / credentials ──────────────────────────────────────────────────────
+config.toml
+tidal_session.json
+tidal_session.json.bak
+
+# ── Build output ───────────────────────────────────────────────────────────────
+dist/
+build_tmp/
+TidalRPC.spec
+*.spec
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+
+# ── Node ──────────────────────────────────────────────────────────────────────
+node_modules/
+package.json
+package-lock.json
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+
+# ── OS noise ──────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini

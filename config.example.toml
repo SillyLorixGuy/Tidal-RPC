@@ -1,0 +1,53 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# config.toml — Tidal Discord RPC configuration
+#
+# Copy this file to config.toml and fill in the required fields.
+# Required fields are marked with  ← REQUIRED
+# Everything else has sensible defaults.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+# ── Discord ───────────────────────────────────────────────────────────────────
+[discord]
+# Your Discord Application ID (from https://discord.com/developers/applications)
+# The app name is what appears as "Listening to ____" — name it "TIDAL"
+client_id = ""   # ← REQUIRED  e.g. "1234567890123456789"
+
+
+# ── Tidal ─────────────────────────────────────────────────────────────────────
+[tidal]
+# From https://developer.tidal.com — create an app, copy the credentials
+client_id     = ""   # ← REQUIRED
+client_secret = ""   # ← REQUIRED
+
+# Where to save the OAuth session so you don't re-login every launch.
+# Default: tidal_session.json in the same folder as this config.
+# session_file = "tidal_session.json"
+
+
+# ── RPC behaviour ─────────────────────────────────────────────────────────────
+[rpc]
+# How often (seconds) to poll the OS for the current track.
+# Lower = snappier updates but slightly more CPU.  5s is a good balance.
+poll_interval = 5
+
+# How often (seconds) to re-push presence for the same track.
+# This keeps the progress bar accurate on long tracks.
+timestamp_refresh_secs = 30
+
+# Text on the button shown in the Discord profile card.
+# Discord allows max 2 buttons; we show one ("Play on TIDAL").
+button_label = "Play on TIDAL"
+
+# Fallback Discord image asset key shown when Tidal art can't be fetched.
+# Upload a fallback image in your Discord app's "Rich Presence → Art Assets"
+# and paste the key here.  Leave blank to show no image on failures.
+fallback_art_key = "tidal_logo"
+
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+[logging]
+# Log level: DEBUG | INFO | WARNING | ERROR
+# Use DEBUG while setting up, INFO for day-to-day use.
+# Logs are written to %APPDATA%\tidal-rpc\tidal_rpc.log
+level = "INFO"
