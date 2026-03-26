@@ -29,7 +29,7 @@ class DiscordRPC:
         try:
             from pypresence import Presence, InvalidID, DiscordNotFound  # type: ignore
             from pypresence.types import ActivityType, StatusDisplayType  # type: ignore
-            _ = StatusDisplayType.STATE   # fails on pypresence < 4.5.0
+            _ = StatusDisplayType.STATE
         except ImportError as e:
             raise ImportError("pypresence not installed. Run: pip install pypresence") from e
         except AttributeError:
@@ -77,14 +77,30 @@ class DiscordRPC:
 
     # ── Presence updates ───────────────────────────────────────────────────────
 
-    def update(self, track: "TrackInfo", art_url: str | None) -> None:
+    def update(
+        self,
+        track:    "TrackInfo",
+        art_url:  str | None,
+        start_ts: float,
+        title:    str,   # pre-padded by caller
+        artist:   str,   # pre-padded by caller
+    ) -> None:
+        """
+        Push a presence update.
+
+        start_ts  — wall-clock time when track started (time.time() - position).
+                    Calculated ONCE per track by the caller and passed in
+                    unchanged. Never recalculate here — it would reset the bar.
+
+        title/artist — pre-padded to Discord's 2-char minimum by caller using
+                    zero-width spaces (technique from ytmdesktop).
+        """
         self._assert_connected()
 
-        start_ts = time.time() - track["position_seconds"]
-        end_ts   = (start_ts + track["duration_seconds"]
-                    if track["duration_seconds"] > 0 else None)
+        end_ts = (start_ts + track["duration_seconds"]
+                  if track["duration_seconds"] > 0 else None)
 
-        payload = self._build_payload(track, art_url, start_ts, end_ts)
+        payload = self._build_payload(track, art_url, start_ts, end_ts, title, artist)
         log.debug("Sending payload: %s", payload)
 
         try:
@@ -92,26 +108,9 @@ class DiscordRPC:
             log.debug("RPC updated: %s — %s", track["artist"], track["title"])
         except Exception as e:
             err = str(e)
-            # Discord validation errors mention "fails because" or "must be a valid"
-            # These are payload problems, not connection drops — don't reconnect.
             if "fails because" in err or "must be a valid" in err or "validation" in err.lower():
                 raise DiscordPayloadError(f"Payload rejected: {e}") from e
             raise DiscordConnectionError(f"RPC update failed: {e}") from e
-
-    def heartbeat(self) -> None:
-        """
-        Send a raw opcode-3 heartbeat on the IPC socket.
-        This tells Discord the connection is alive without modifying the
-        displayed activity — calling update() instead would reset the
-        progress bar by recalculating timestamps from scratch.
-        """
-        if self._rpc is None:
-            return
-        try:
-            self._rpc.send_data(3, {"v": 1, "client_id": self._client_id})
-            log.debug("Heartbeat sent")
-        except Exception as e:
-            log.debug("Heartbeat failed (harmless): %s", e)
 
     def clear(self) -> None:
         if self._rpc is None:
@@ -130,16 +129,16 @@ class DiscordRPC:
         art_url: str | None,
         start:   float,
         end:     float | None,
+        title:   str,
+        artist:  str,
     ) -> dict:
-        title  = _truncate(track["title"],  128)
-        artist = _truncate(track["artist"], 128)
-        album  = _truncate(track["album"],  128) if track.get("album") else None
+        album = _truncate(track["album"], 128) if track.get("album") else None
 
         payload: dict = {
             "activity_type":       self._ActivityType.LISTENING,
             "status_display_type": self._StatusDisplayType.STATE,
-            "details": title,    # song title — top line of presence card
-            "state":   artist,   # artist name — bottom line of presence card
+            "details": _truncate(title,  128),
+            "state":   _truncate(artist, 128),
             "start":   int(start),
         }
 
@@ -149,20 +148,14 @@ class DiscordRPC:
         if art_url:
             payload["large_image"] = art_url
         if album:
-            payload["large_text"] = album
+            payload["large_text"] = _truncate(album, 128)
 
-        # urllib.parse.quote handles ALL special characters including unicode,
-        # symbols (⚸, +, &, #, etc.) and multi-byte UTF-8 sequences.
-        # safe='' means even '/' gets encoded, which is correct for a query param.
         search_query = quote(f"{track['artist']} {track['title']}", safe="")
         button_url   = f"https://tidal.com/search?q={search_query}"
-
-        # Sanity-check the URL — if it somehow still contains illegal chars,
-        # drop the button entirely rather than letting it kill the whole update.
         if _is_valid_url(button_url):
             payload["buttons"] = [{"label": "Play on TIDAL", "url": button_url}]
         else:
-            log.warning("Button URL failed validation check — omitting button. URL was: %s", button_url)
+            log.warning("Button URL invalid — omitting. URL: %s", button_url)
 
         return payload
 
@@ -171,8 +164,6 @@ class DiscordRPC:
             raise DiscordConnectionError("Not connected to Discord IPC")
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
-
 def _truncate(text: str, max_len: int) -> str:
     if len(text) <= max_len:
         return text
@@ -180,10 +171,6 @@ def _truncate(text: str, max_len: int) -> str:
 
 
 def _is_valid_url(url: str) -> bool:
-    """
-    Basic URI sanity check before sending to Discord.
-    Discord requires http/https, a host, and no unencoded spaces or brackets.
-    """
     try:
         from urllib.parse import urlparse
         parsed = urlparse(url)
@@ -191,7 +178,6 @@ def _is_valid_url(url: str) -> bool:
             return False
         if not parsed.netloc:
             return False
-        # Unencoded spaces or curly braces are always wrong in a URI
         for bad in (" ", "{", "}", "|", "\\", "^", "`"):
             if bad in url:
                 return False

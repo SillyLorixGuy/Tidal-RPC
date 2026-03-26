@@ -6,6 +6,7 @@ tidal_session.json.bak
 
 # ── Build output ───────────────────────────────────────────────────────────────
 dist/
+dist/TidalRPC/
 build_tmp/
 TidalRPC.spec
 *.spec

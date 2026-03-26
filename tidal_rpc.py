@@ -1,11 +1,13 @@
 """
 tidal_rpc.py — Main entry point for Tidal Discord Rich Presence.
+
+State logic based on ytmdesktop/ytmdesktop discord-presence integration.
 """
 
 import sys
 import time
 import logging
-import subprocess
+import threading
 from pathlib import Path
 
 from config import load_config, SCRIPT_DIR
@@ -32,41 +34,26 @@ _handle_cli_args()
 # ── First-run setup ────────────────────────────────────────────────────────────
 
 def _needs_setup(cfg: dict) -> bool:
-    """Return True if tidal_session.json doesn't exist yet."""
     return not Path(cfg["tidal"]["session_file"]).exists()
 
 
 def _relaunch_with_console(cfg: dict) -> None:
-    """
-    No Tidal session found and we're running as a silent exe.
-    Launch TidalRPC_Setup.exe (the dedicated console setup exe) and wait
-    for it to finish, then relaunch this exe normally if auth succeeded.
-    """
     exe_dir   = Path(sys.executable).parent.resolve()
     setup_exe = exe_dir / "TidalRPC_Setup.exe"
 
+    import ctypes
+
     if not setup_exe.exists():
-        # Setup exe missing — show a message box as fallback
-        import ctypes
         ctypes.windll.user32.MessageBoxW(
             0,
             f"TidalRPC_Setup.exe not found in:\n{exe_dir}\n\n"
             f"Please run TidalRPC_Setup.exe manually to authenticate Tidal.",
             "Tidal RPC — Setup Required",
-            0x10  # MB_ICONERROR
+            0x10
         )
         sys.exit(1)
 
-    import ctypes
-
-    # ShellExecuteW goes through the Windows shell so it always gets a proper
-    # window and correct environment — subprocess.Popen inherits the parent's
-    # no-console flag which causes silent failures from frozen exes.
     shell32 = ctypes.windll.shell32
-
-    # Launch setup and wait for it to finish (SW_SHOWNORMAL = 1)
-    # ShellExecuteW returns immediately so we use WaitForSingleObject via
-    # ShellExecuteExW to actually block until the user closes setup.
     SEE_MASK_NOCLOSEPROCESS = 0x00000040
 
     class _SEI(ctypes.Structure):
@@ -93,16 +80,14 @@ def _relaunch_with_console(cfg: dict) -> None:
     sei.fMask    = SEE_MASK_NOCLOSEPROCESS
     sei.lpVerb   = "open"
     sei.lpFile   = str(setup_exe)
-    sei.nShow    = 1   # SW_SHOWNORMAL
+    sei.nShow    = 1
 
     shell32.ShellExecuteExW(ctypes.byref(sei))
 
-    # Block until the setup window is closed
     if sei.hProcess:
         ctypes.windll.kernel32.WaitForSingleObject(sei.hProcess, 0xFFFFFFFF)
         ctypes.windll.kernel32.CloseHandle(sei.hProcess)
 
-    # If auth succeeded, launch main exe via shell so it gets a clean environment
     if Path(cfg["tidal"]["session_file"]).exists():
         shell32.ShellExecuteW(
             None, "open", str(Path(sys.executable).resolve()),
@@ -115,6 +100,25 @@ def _relaunch_with_console(cfg: dict) -> None:
 
 setup_logger()
 log = logging.getLogger("tidal_rpc")
+
+# How long to wait after playback stops before clearing presence.
+# Covers track-to-track gaps, brief pauses, and skip stutters.
+# Matches ytmdesktop's 30-second pause timeout.
+_PAUSE_CLEAR_DELAY = 30.0
+
+# Minimum character length Discord requires for details/state fields.
+_DISCORD_MIN_LEN = 2
+
+
+def _pad(text: str) -> str:
+    """
+    Pad short strings to Discord's 2-char minimum using zero-width spaces.
+    Technique from ytmdesktop — invisible to the user but satisfies validation.
+    """
+    if len(text) < _DISCORD_MIN_LEN:
+        return text + "\u200b" * (_DISCORD_MIN_LEN - len(text))
+    return text
+
 
 def main() -> None:
     log.info("═" * 50)
@@ -132,17 +136,13 @@ def main() -> None:
 
     cfg = load_config()
 
-    # ── First run check — no session file means OAuth hasn't been done yet ─────
     if _needs_setup(cfg):
         if getattr(sys, "frozen", False):
-            # Running as compiled exe with no console — open a setup window
             _relaunch_with_console(cfg)
-            return  # _relaunch_with_console calls sys.exit but just in case
+            return
         else:
-            # Running as a Python script — console is already visible, just proceed
             log.info("No Tidal session found — starting OAuth flow")
 
-    # ── Init subsystems ────────────────────────────────────────────────────────
     try:
         tidal = TidalMeta(cfg)
     except TidalAuthError as e:
@@ -153,18 +153,47 @@ def main() -> None:
 
     log.info("Entering main poll loop (interval: %ds)", cfg["rpc"]["poll_interval"])
 
-    last_track_key:     str | None = None
-    last_art_url:       str | None = None
-    last_push_time:     float      = 0.0
-    last_push_position: float      = 0.0
-    last_keepalive:     float      = 0.0
-    last_position:      float      = -1.0  # -1 = no previous SMTC reading yet
-    discord_connected:  bool       = False
+    # ── State vars ─────────────────────────────────────────────────────────────
+    last_track_key:    str | None = None   # "artist::title" of last pushed track
+    last_art_url:      str | None = None   # cached art URL for current track
+    track_start_ts:    float      = 0.0    # wall-clock start time, set once per track
+    last_position:     float      = -1.0   # SMTC position from previous cycle
+    discord_connected: bool       = False
 
+    # Pause timeout — mirrors ytmdesktop's pauseTimeout.
+    # When playback stops we don't clear immediately; we schedule a clear
+    # 30 seconds later. If playback resumes before that, we cancel it.
+    pause_timer: threading.Timer | None = None
+
+    def _schedule_clear() -> threading.Timer:
+        """Start a 30s timer that clears presence if not cancelled first."""
+        def _do_clear():
+            nonlocal last_track_key, last_art_url, pause_timer
+            log.info("Pause timeout — clearing presence")
+            try:
+                rpc.clear()
+            except Exception:
+                pass
+            last_track_key = None
+            last_art_url   = None
+            pause_timer    = None
+        t = threading.Timer(_PAUSE_CLEAR_DELAY, _do_clear)
+        t.daemon = True
+        t.start()
+        return t
+
+    def _cancel_clear():
+        nonlocal pause_timer
+        if pause_timer is not None:
+            pause_timer.cancel()
+            pause_timer = None
+
+    # ── Main loop ──────────────────────────────────────────────────────────────
     while True:
         try:
             track = get_current_track()
 
+            # Connect / reconnect
             if not discord_connected:
                 try:
                     rpc.connect()
@@ -176,59 +205,56 @@ def main() -> None:
                     time.sleep(cfg["rpc"]["poll_interval"])
                     continue
 
+            # ── Nothing playing (paused or stopped) ───────────────────────────
             if track is None:
-                if last_track_key is not None:
-                    log.info("Playback stopped — clearing presence")
-                    rpc.clear()
-                    last_track_key = None
-                    last_art_url   = None
+                # Schedule a delayed clear if we haven't already.
+                # This prevents flicker during track-to-track gaps.
+                if last_track_key is not None and pause_timer is None:
+                    log.debug("Playback stopped — scheduling clear in %ds", _PAUSE_CLEAR_DELAY)
+                    pause_timer = _schedule_clear()
+                last_position = -1.0
                 time.sleep(cfg["rpc"]["poll_interval"])
                 continue
 
-            track_key     = f"{track['artist']}::{track['title']}"
-            track_changed = track_key != last_track_key
-            actual_pos    = track["position_seconds"]
-            now           = time.time()
+            # ── Playback resumed — cancel any pending clear ───────────────────
+            _cancel_clear()
 
-            # Detect pause/resume by checking if the position stopped moving.
-            # During normal playback SMTC position advances ~poll_interval seconds
-            # between cycles. After a pause+resume the position jumps back or
-            # forward by more than the threshold relative to the previous reading.
-            # We compare raw SMTC values — no wall-clock math — so loop overhead
-            # never causes false positives.
-            pos_delta       = abs(actual_pos - last_position)
-            poll            = cfg["rpc"]["poll_interval"]
-            # A genuine scrub/resume produces a delta outside the expected
-            # [0, poll + tolerance] range. Tolerance of 3s covers SMTC jitter.
-            position_jumped = (
-                last_track_key is not None
-                and not track_changed
-                and last_position > 0
-                and not (0 <= pos_delta <= poll + 3.0)
+            track_key    = f"{track['artist']}::{track['title']}"
+            actual_pos   = track["position_seconds"]
+            track_changed = track_key != last_track_key
+
+            # Scrub detection — if position went backwards it's a seek.
+            # From ytmdesktop: oldProgress > this.progress means the user scrubbed.
+            # We also catch large forward jumps (> poll + 3s tolerance).
+            poll = cfg["rpc"]["poll_interval"]
+            scrubbed = (
+                not track_changed
+                and last_position >= 0
+                and (
+                    actual_pos < last_position                        # scrub backward
+                    or actual_pos > last_position + poll + 3.0       # scrub forward
+                )
             )
 
-            if position_jumped:
-                log.debug(
-                    "Position jump detected: %.1fs → %.1fs (delta %.1fs) — resyncing",
-                    last_position, actual_pos, pos_delta
-                )
-
-            if track_changed or position_jumped:
+            if track_changed or scrubbed:
                 if track_changed:
                     log.info("Now playing: %s — %s", track["artist"], track["title"])
-                    last_art_url = tidal.get_art_url(track["title"], track["artist"])
+                    last_art_url    = tidal.get_art_url(track["title"], track["artist"])
+                    # Calculate start_ts once per track — never recalculate to
+                    # avoid resetting the progress bar on subsequent updates
+                    track_start_ts  = time.time() - actual_pos
+                else:
+                    log.debug("Scrub detected: %.1fs → %.1fs — resyncing", last_position, actual_pos)
+                    track_start_ts = time.time() - actual_pos
 
-                rpc.update(track, last_art_url)
-                last_track_key  = track_key
-                last_keepalive  = now
-
-            elif now - last_keepalive >= 15.0 and last_track_key is not None:
-                # Send a raw heartbeat ping on the IPC socket.
-                # rpc.update() would reset the progress bar — we just want to
-                # tell Discord the connection is still alive without changing
-                # the displayed activity at all.
-                rpc.heartbeat()
-                last_keepalive = now
+                rpc.update(
+                    track     = track,
+                    art_url   = last_art_url,
+                    start_ts  = track_start_ts,
+                    title     = _pad(track["title"]),
+                    artist    = _pad(track["artist"]),
+                )
+                last_track_key = track_key
 
             last_position = actual_pos
 
@@ -242,6 +268,7 @@ def main() -> None:
 
         except DiscordConnectionError as e:
             log.warning("Lost Discord IPC connection (%s) — will reconnect", e)
+            _cancel_clear()
             discord_connected = False
             last_track_key    = None
             last_art_url      = None
@@ -249,6 +276,7 @@ def main() -> None:
 
         except KeyboardInterrupt:
             log.info("Shutting down — clearing Discord presence")
+            _cancel_clear()
             rpc.close(clear_first=True)
             log.info("Goodbye.")
             sys.exit(0)
